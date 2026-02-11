@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS staging.detran_vehicle_raw (
     csv_row INTEGER
 );
 
-COMMENT ON TABLE staging.detran_vehicle_raw IS 'Raw data from detran csv files, stored exactly as received (Total rows analyzed: 17,167)';
+COMMENT ON TABLE staging.detran_vehicle_raw IS 'Raw data from detran csv files, stored exactly as received (Total rows analyzed: 1,278,816)';
 
 -- Indexes for faster lookups
 CREATE INDEX IF NOT EXISTS idx_raw_load_timestamp ON staging.detran_vehicle_raw(load_timestamp);
