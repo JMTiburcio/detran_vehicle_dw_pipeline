@@ -5,8 +5,6 @@
 -- STATUS: READY - This table is ready for use
 -- Pipeline stage: Extract + Load Raw (Phase 1)
 
-UF;Marca Modelo;Ano Fabricação Veículo CRV;Qtd. Veículos
-
 CREATE TABLE IF NOT EXISTS staging.detran_vehicle_raw (
     id_raw SERIAL PRIMARY KEY,
     -- Original columns from detran csv (normalized names, Portuguese)
@@ -23,5 +21,4 @@ CREATE TABLE IF NOT EXISTS staging.detran_vehicle_raw (
 COMMENT ON TABLE staging.detran_vehicle_raw IS 'Raw data from detran csv files, stored exactly as received (Total rows analyzed: 17,167)';
 
 -- Indexes for faster lookups
-CREATE INDEX IF NOT EXISTS idx_raw_codigo_detran ON staging.detran_vehicle_raw(codigo_detran);
 CREATE INDEX IF NOT EXISTS idx_raw_load_timestamp ON staging.detran_vehicle_raw(load_timestamp);
