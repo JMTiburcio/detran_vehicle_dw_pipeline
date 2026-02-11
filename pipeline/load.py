@@ -1,8 +1,8 @@
 """
 Load module - Load raw data into staging layer.
 
-This module handles inserting raw data from Excel into
-staging.fraga_vehicle_raw table.
+This module handles inserting raw data from DETRAN CSV into
+staging.detran_vehicle_raw table.
 """
 
 import pandas as pd
@@ -50,7 +50,7 @@ def create_staging_schemas(conn):
 
 def ensure_staging_table_exists(conn=None):
     """
-    Ensure staging schema and fraga_vehicle_raw table exist.
+    Ensure staging schema and detran_vehicle_raw table exist.
     Creates them if they don't exist.
     
     Args:
@@ -90,7 +90,7 @@ def ensure_staging_table_exists(conn=None):
             SELECT table_name 
             FROM information_schema.tables 
             WHERE table_schema = 'staging' 
-            AND table_name = 'fraga_vehicle_raw'
+            AND table_name = 'detran_vehicle_raw'
         """)
         table_exists = cursor.fetchone() is not None
         
@@ -109,19 +109,19 @@ def ensure_staging_table_exists(conn=None):
 
 def load_raw_data(
     df: pd.DataFrame,
-    table_name: str = "staging.fraga_vehicle_raw",
+    table_name: str = "staging.detran_vehicle_raw",
     source_file: Optional[str] = None,
     conn: Optional[psycopg2.extensions.connection] = None
 ) -> int:
     """
     Load raw DataFrame into staging table.
-    
+
     Args:
-        df: DataFrame with raw data from Excel
+        df: DataFrame with raw data from DETRAN CSV
         table_name: Target table name
-        source_file: Path to source Excel file (for metadata)
+        source_file: Path to source CSV file (for metadata)
         conn: Database connection (if None, creates new)
-        
+
     Returns:
         Number of rows inserted
     """
@@ -160,7 +160,7 @@ def load_raw_data(
         # Add metadata columns
         source_file_name = Path(source_file).name if source_file else None
         df_mapped['source_file'] = source_file_name
-        df_mapped['excel_row'] = range(2, len(df_mapped) + 2)  # Excel rows start at 2 (row 1 is header)
+        df_mapped['csv_row'] = range(2, len(df_mapped) + 2)  # CSV rows: 1 = header, data from 2
         
         # Get list of SQL columns (excluding id_raw which is SERIAL)
         sql_columns = [col for col in df_mapped.columns if col not in ['id_raw']]
@@ -210,14 +210,14 @@ def load_raw_data(
 
 
 def truncate_staging_table(
-    table_name: str = "staging.fraga_vehicle_raw",
+    table_name: str = "staging.detran_vehicle_raw",
     conn: Optional[psycopg2.extensions.connection] = None
 ):
     """
     Truncate staging table (for reprocessing).
-    
-    Uses CASCADE so that tables referencing this one (e.g. fraga_vehicle_norm
-    referencing fraga_vehicle_raw) are truncated in the same command.
+
+    Uses CASCADE so that tables referencing this one (e.g. detran_vehicle_norm
+    referencing detran_vehicle_raw) are truncated in the same command.
     
     Args:
         table_name: Table to truncate
