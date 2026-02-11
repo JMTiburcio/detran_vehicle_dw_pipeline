@@ -1,0 +1,12 @@
+# Core dependencies
+pandas
+psycopg2-binary
+python-dotenv
+openpyxl
+
+# Utilities
+python-dateutil
+
+# Testing (optional for now)
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
