@@ -27,6 +27,32 @@ COL_MARCA_MODELO = "Marca Modelo"
 COL_ANO = "Ano Fabricação Veículo CRV"
 COL_QTD = "Qtd. Veículos"
 
+# Dicionário de normalização de marcas
+BRAND_NORMALIZATION = {
+    "R": "REBOQUE",
+    "REB": "REBOQUE",
+    "SR": "SEMI REBOQUE",
+    "VW": "VOLKSWAGEN",
+    "VOLKS": "VOLKSWAGEN",
+    "GM": "CHEVROLET",
+    "CHEV": "CHEVROLET",
+    "MERCEDES-BENZ": "MERCEDES BENZ",
+    "MBENZ": "MERCEDES BENZ",
+    "HARLEY DAVIDSON": "HARLEY-DAVIDSON",
+    "H.DAVIDSON": "HARLEY-DAVIDSON",
+    "M.BENZ": "MERCEDES BENZ",
+    "JTZ": "HAOJUE",
+    "JTA": "SUZUKI",
+    "JTA-SUZUKI": "SUZUKI",
+    "MPOLO": "MARCOPOLO",
+    "MMC": "MITSUBISHI",
+    "CAOACHERY": "CHERY",
+    "LR": "LAND ROVER",
+    "RE": "ROYAL ENFIELD",
+    "MOTO TRAXX": "TRAXX",
+    "IVECOFIAT": "IVECO",
+}
+
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -74,6 +100,10 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .str.split("/")
         .str[0]
     )
+    
+    # Aplicar normalização de marcas
+    work["MARCA"] = work["MARCA"].map(lambda x: BRAND_NORMALIZATION.get(x, x) if pd.notna(x) else x)
+    
     work["Marca Modelo s/ marca"] = (
         work["Marca Modelo s/ importado"]
         .str.replace(r"^[^/]+/", "", regex=True)
