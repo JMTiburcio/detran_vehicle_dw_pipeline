@@ -253,3 +253,194 @@ def add_hash_to_norm_df(df_norm: pd.DataFrame) -> pd.DataFrame:
         hashes.append(h)
     df["hash_veiculo"] = hashes
     return df
+
+
+# ============================================================================
+# DETRAN-specific functions
+# ============================================================================
+
+def generate_hash_detran_veiculo(
+    uf: Optional[str],
+    marca: Optional[str],
+    modelo: Optional[str],
+    ano_fabricacao: Optional[int],
+) -> str:
+    """
+    Generate hash_veiculo for DETRAN vehicles from uf + marca + modelo + ano_fabricacao.
+
+    Returns:
+        SHA256 hash string (64 characters)
+    """
+    components = [
+        str(uf) if uf is not None else "",
+        str(marca) if marca is not None else "",
+        str(modelo) if modelo is not None else "",
+        str(ano_fabricacao) if ano_fabricacao is not None else "",
+    ]
+    hash_string = "|".join(components)
+    hash_bytes = hashlib.sha256(hash_string.encode("utf-8")).digest()
+    return hash_bytes.hex()
+
+
+CORE_DETRAN_DIM_COLUMNS = [
+    "hash_veiculo",
+    "uf",
+    "marca",
+    "modelo",
+    "ano_fabricacao",
+    "frota",
+    "descricao_detran",
+    "id_raw",
+]
+
+
+def add_hash_to_detran_norm_df(df_norm: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add column hash_veiculo to DETRAN norm DataFrame.
+
+    Drops id_norm, data_carga if present so the result is ready for core.dim_detran_veiculo.
+    """
+    df = df_norm.copy()
+    for drop in ("id_norm", "data_carga"):
+        if drop in df.columns:
+            df = df.drop(columns=[drop])
+
+    hashes = []
+    for _, row in df.iterrows():
+        h = generate_hash_detran_veiculo(
+            uf=row.get("uf"),
+            marca=row.get("marca"),
+            modelo=row.get("modelo"),
+            ano_fabricacao=row.get("ano_fabricacao"),
+        )
+        hashes.append(h)
+    df["hash_veiculo"] = hashes
+    return df
+
+
+def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connection] = None) -> Tuple[bool, bool]:
+    """
+    Ensure core schema and DETRAN tables (dim_detran_veiculo, audit_dim_detran_veiculo) and trigger exist.
+
+    Returns:
+        (schema_created: bool, tables_created: bool)
+    """
+    if conn is None:
+        conn = get_db_connection_from_env()
+        close_conn = True
+    else:
+        close_conn = False
+
+    base = Path(__file__).parent.parent / "sql" / "core"
+    schema_created = False
+    tables_created = False
+
+    try:
+        cursor = conn.cursor()
+
+        # 01 - Schema
+        cursor.execute("SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'core'")
+        if cursor.fetchone() is None:
+            execute_sql_file(str(base / "01_create_schema.sql"), conn)
+            schema_created = True
+
+        # 02 - dim_detran_veiculo
+        cursor.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'core' AND table_name = 'dim_detran_veiculo'
+        """)
+        if cursor.fetchone() is None:
+            execute_sql_file(str(base / "02_create_dim_detran_veiculo.sql"), conn)
+            tables_created = True
+
+        # 03 - audit_dim_detran_veiculo
+        cursor.execute("""
+            SELECT table_name FROM information_schema.tables
+            WHERE table_schema = 'core' AND table_name = 'audit_dim_detran_veiculo'
+        """)
+        if cursor.fetchone() is None:
+            execute_sql_file(str(base / "03_create_audit_dim_detran_veiculo.sql"), conn)
+            tables_created = True
+
+        # 04 - Trigger (recreate to keep in sync)
+        execute_sql_file(str(base / "04_create_trigger_detran.sql"), conn)
+
+        cursor.close()
+        return schema_created, tables_created
+    finally:
+        if close_conn:
+            conn.close()
+
+
+def _row_to_detran_core_values(row: pd.Series) -> tuple:
+    """Build a tuple of values for core.dim_detran_veiculo in CORE_DETRAN_DIM_COLUMNS order."""
+    out = []
+    for col in CORE_DETRAN_DIM_COLUMNS:
+        val = row.get(col)
+        if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
+            out.append(None)
+        else:
+            out.append(val)
+    return tuple(out)
+
+
+def upsert_dim_detran_veiculo(
+    df: pd.DataFrame,
+    table_name: str = "core.dim_detran_veiculo",
+    conn: Optional[psycopg2.extensions.connection] = None,
+) -> Dict[str, int]:
+    """
+    Upsert DETRAN normalized data into core.dim_detran_veiculo.
+
+    - If hash_veiculo does not exist -> INSERT (trigger logs to audit).
+    - If hash_veiculo exists -> UPDATE (trigger logs changes to audit).
+
+    Args:
+        df: DataFrame with norm columns + hash_veiculo (from add_hash_to_detran_norm_df).
+        table_name: Target table.
+        conn: Database connection.
+
+    Returns:
+        {'inserted': int, 'updated': int}
+    """
+    from psycopg2.extras import execute_values
+
+    if conn is None:
+        conn = get_db_connection_from_env()
+        close_conn = True
+    else:
+        close_conn = False
+
+    inserted = 0
+
+    try:
+        if len(df) == 0:
+            return {"inserted": 0, "updated": 0}
+
+        cols_no_hash = [c for c in CORE_DETRAN_DIM_COLUMNS if c != "hash_veiculo"]
+        columns_str = ", ".join(CORE_DETRAN_DIM_COLUMNS)
+        update_set = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols_no_hash)
+
+        sql = f"""
+            INSERT INTO {table_name} ({columns_str})
+            VALUES %s
+            ON CONFLICT (hash_veiculo) DO UPDATE SET {update_set}
+        """
+
+        values = [_row_to_detran_core_values(row) for _, row in df.iterrows()]
+
+        cursor = conn.cursor()
+        try:
+            execute_values(cursor, sql, values, page_size=1000)
+            conn.commit()
+            inserted = len(values)
+        except Exception as e:
+            conn.rollback()
+            raise Exception(f"Error upserting into core.dim_detran_veiculo: {str(e)}") from e
+        finally:
+            cursor.close()
+
+        return {"inserted": inserted, "updated": 0}
+    finally:
+        if close_conn:
+            conn.close()

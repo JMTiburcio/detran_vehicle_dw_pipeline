@@ -7,9 +7,9 @@ PHASE 1: Extract + Load Raw
 PHASE 2: Normalize + Load to staging.detran_vehicle_norm
 - Read from staging.detran_vehicle_raw, normalize (marca/modelo, valid brands), load to staging.detran_vehicle_norm
 
-# PHASE 3: Core (commented out)
-# - Ensure core schema and tables (dim_veiculo, audit_dim_veiculo, trigger)
-# - Add hash_veiculo to norm data, upsert into core.dim_veiculo (audit via trigger)
+PHASE 3: Core
+- Ensure core schema and tables (dim_detran_veiculo, audit_dim_detran_veiculo, trigger)
+- Add hash_veiculo to norm data (uf+marca+modelo+ano_fabricacao), upsert into core.dim_detran_veiculo (audit via trigger)
 
 TODO: Phase 4 - Validate + Analytics
 """
@@ -20,20 +20,21 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from orchestration.pipeline_args import parse_pipeline_args, PHASE_RAW, PHASE_NORMALIZE
+from orchestration.pipeline_args import parse_pipeline_args, PHASE_RAW, PHASE_NORMALIZE, PHASE_CORE
 from pipeline.extract import read_csv_file, validate_csv_structure, list_csv_files
 from pipeline.load import load_raw_data, ensure_staging_table_exists, truncate_staging_table
 from pipeline.normalize import (
     ensure_norm_table_exists,
     read_raw_data,
+    read_norm_data,
     normalize_dataframe,
     load_normalized_to_staging,
 )
-# from pipeline.transform import (
-#     ensure_core_tables_exist,
-#     add_hash_to_norm_df,
-#     upsert_dim_veiculo,
-# )
+from pipeline.transform import (
+    ensure_core_detran_tables_exist,
+    add_hash_to_detran_norm_df,
+    upsert_dim_detran_veiculo,
+)
 from pipeline.utils import setup_logging
 import os
 import pandas as pd
@@ -59,6 +60,7 @@ def main():
     df_raw = pd.DataFrame()
     df_norm = pd.DataFrame()
     rows_norm_inserted = 0
+    rows_core_inserted = 0
 
     try:
         # ---------------------------------------------------------------------
@@ -132,20 +134,44 @@ def main():
                     rows_norm_inserted = load_normalized_to_staging(df_norm)
                     logger.info(f"Inserted {rows_norm_inserted} rows into staging.detran_vehicle_norm")
 
-        # ========================================================================
-        # PHASE 3: CORE (commented out)
-        # ========================================================================
-        # logger.info("")
-        # logger.info("=" * 80)
-        # logger.info("PHASE 3: Transform to core.dim_veiculo (hash + upsert + audit)")
-        # logger.info("=" * 80)
-        # logger.info("Step 8: Ensuring core schema and tables exist...")
-        # core_schema_created, core_tables_created = ensure_core_tables_exist()
-        # ...
-        # logger.info("Step 9: Adding hash_veiculo and upserting into core.dim_veiculo...")
-        # df_core = add_hash_to_norm_df(df_norm)
-        # result = upsert_dim_veiculo(df_core)
-        # ...
+        # ---------------------------------------------------------------------
+        # PHASE 3: Core (hash + upsert to dim_detran_veiculo + audit via trigger)
+        # ---------------------------------------------------------------------
+        if opts.start_from <= PHASE_CORE:
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("PHASE 3: Transform to core.dim_detran_veiculo (hash + upsert + audit)")
+            logger.info("=" * 80)
+
+            logger.info("Step 8: Ensuring core schema and tables exist...")
+            core_schema_created, core_tables_created = ensure_core_detran_tables_exist()
+            if core_schema_created:
+                logger.info("Created core schema")
+            if core_tables_created:
+                logger.info("Created core.dim_detran_veiculo and/or audit table + trigger")
+            if not core_schema_created and not core_tables_created:
+                logger.info("Core schema and tables already exist")
+
+            # Read norm data: if we ran Phase 2, use df_norm in memory; else read from DB
+            if opts.start_from <= PHASE_NORMALIZE and len(df_norm) > 0:
+                df_for_core = df_norm
+                logger.info(f"Step 9: Using {len(df_for_core)} rows from Phase 2 (in memory)")
+            else:
+                logger.info("Step 9: Reading data from staging.detran_vehicle_norm...")
+                df_for_core = read_norm_data()
+                logger.info(f"Read {len(df_for_core)} rows from staging.detran_vehicle_norm")
+
+            if len(df_for_core) == 0:
+                logger.warning("No data in norm. Skipping core upsert.")
+            else:
+                logger.info("Step 10: Adding hash_veiculo (uf+marca+modelo+ano_fabricacao)...")
+                df_core = add_hash_to_detran_norm_df(df_for_core)
+                logger.info(f"Generated {len(df_core)} hashes")
+
+                logger.info("Step 11: Upserting into core.dim_detran_veiculo...")
+                result = upsert_dim_detran_veiculo(df_core)
+                rows_core_inserted = result["inserted"]
+                logger.info(f"Upserted {rows_core_inserted} rows into core.dim_detran_veiculo (audit via trigger)")
 
         # Summary
         logger.info("")
@@ -154,8 +180,11 @@ def main():
         logger.info("=" * 80)
         if rows_inserted is not None:
             logger.info(f"Phase 1 - Rows loaded to raw: {rows_inserted} (staging.detran_vehicle_raw)")
-        if len(df_norm) > 0:
+        if rows_norm_inserted > 0:
             logger.info(f"Phase 2 - Rows loaded to norm: {rows_norm_inserted} (staging.detran_vehicle_norm)")
+        if rows_core_inserted > 0:
+            logger.info(f"Phase 3 - Rows upserted to core: {rows_core_inserted} (core.dim_detran_veiculo)")
+            logger.info(f"Phase 3 - Audit trail available in: core.audit_dim_detran_veiculo")
         logger.info("")
 
     except Exception as e:
