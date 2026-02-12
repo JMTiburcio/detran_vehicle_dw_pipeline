@@ -7,9 +7,10 @@ PHASE 1: Extract + Load Raw
 PHASE 2: Normalize + Load to staging.detran_vehicle_norm
 - Read from staging.detran_vehicle_raw, normalize (marca/modelo, valid brands), load to staging.detran_vehicle_norm
 
-PHASE 3: Core
-- Ensure core schema and tables (dim_detran_veiculo, audit_dim_detran_veiculo, trigger)
-- Add hash_veiculo to norm data (uf+marca+modelo+ano_fabricacao), upsert into core.dim_detran_veiculo (audit via trigger)
+PHASE 3: Core (dimensional model)
+- Ensure core schema and tables (dim_veiculo_detran, fato_frota_uf, audits, triggers)
+- Extract unique vehicles from norm, upsert into dim_veiculo_detran
+- Extract frota facts (uf, frota per vehicle), upsert into fato_frota_uf
 
 TODO: Phase 4 - Validate + Analytics
 """
@@ -32,8 +33,10 @@ from pipeline.normalize import (
 )
 from pipeline.transform import (
     ensure_core_detran_tables_exist,
-    add_hash_to_detran_norm_df,
-    upsert_dim_detran_veiculo,
+    prepare_dim_veiculo_from_norm,
+    upsert_dim_veiculo_detran,
+    get_id_veiculo_from_hashes,
+    upsert_fato_frota_uf,
 )
 from pipeline.utils import setup_logging
 import os
@@ -60,7 +63,8 @@ def main():
     df_raw = pd.DataFrame()
     df_norm = pd.DataFrame()
     rows_norm_inserted = 0
-    rows_core_inserted = 0
+    rows_dim_upserted = 0
+    rows_fato_upserted = 0
 
     try:
         # ---------------------------------------------------------------------
@@ -135,12 +139,12 @@ def main():
                     logger.info(f"Inserted {rows_norm_inserted} rows into staging.detran_vehicle_norm")
 
         # ---------------------------------------------------------------------
-        # PHASE 3: Core (hash + upsert to dim_detran_veiculo + audit via trigger)
+        # PHASE 3: Core (dimensional: dim_veiculo + fato_frota)
         # ---------------------------------------------------------------------
         if opts.start_from <= PHASE_CORE:
             logger.info("")
             logger.info("=" * 80)
-            logger.info("PHASE 3: Transform to core.dim_detran_veiculo (hash + upsert + audit)")
+            logger.info("PHASE 3: Transform to core (dim_veiculo_detran + fato_frota_uf)")
             logger.info("=" * 80)
 
             logger.info("Step 8: Ensuring core schema and tables exist...")
@@ -148,7 +152,7 @@ def main():
             if core_schema_created:
                 logger.info("Created core schema")
             if core_tables_created:
-                logger.info("Created core.dim_detran_veiculo and/or audit table + trigger")
+                logger.info("Created dim_veiculo_detran, fato_frota_uf, audits, triggers")
             if not core_schema_created and not core_tables_created:
                 logger.info("Core schema and tables already exist")
 
@@ -164,14 +168,38 @@ def main():
             if len(df_for_core) == 0:
                 logger.warning("No data in norm. Skipping core upsert.")
             else:
-                logger.info("Step 10: Adding hash_veiculo (uf+marca+modelo+ano_fabricacao)...")
-                df_core = add_hash_to_detran_norm_df(df_for_core)
-                logger.info(f"Generated {len(df_core)} hashes")
+                # Step 10: Prepare and upsert dim_veiculo (unique vehicles)
+                logger.info("Step 10: Preparing dim_veiculo (unique marca+modelo+ano+descricao)...")
+                df_dim = prepare_dim_veiculo_from_norm(df_for_core)
+                logger.info(f"Unique vehicles: {len(df_dim)}")
 
-                logger.info("Step 11: Upserting into core.dim_detran_veiculo...")
-                result = upsert_dim_detran_veiculo(df_core)
-                rows_core_inserted = result["inserted"]
-                logger.info(f"Upserted {rows_core_inserted} rows into core.dim_detran_veiculo (audit via trigger)")
+                logger.info("Step 11: Upserting into core.dim_veiculo_detran...")
+                rows_dim_upserted = upsert_dim_veiculo_detran(df_dim)
+                logger.info(f"Upserted {rows_dim_upserted} vehicles into core.dim_veiculo_detran")
+
+                # Step 12: Get id_veiculo for each hash, prepare fato_frota
+                logger.info("Step 12: Querying id_veiculo from dim_veiculo_detran...")
+                hashes = df_dim["hash_veiculo"].unique().tolist()
+                df_id_map = get_id_veiculo_from_hashes(hashes)
+                logger.info(f"Retrieved {len(df_id_map)} id_veiculo mappings")
+
+                # Add hash_veiculo to df_for_core (for merge)
+                from pipeline.transform import generate_hash_veiculo_detran
+                df_for_core["hash_veiculo"] = df_for_core.apply(
+                    lambda r: generate_hash_veiculo_detran(r["marca"], r["modelo"], r["ano_fabricacao"]),
+                    axis=1
+                )
+
+                # Merge id_veiculo into df_for_core
+                df_for_core = df_for_core.merge(df_id_map, on="hash_veiculo", how="left")
+
+                # Build fato DataFrame: id_veiculo, uf, frota, id_raw
+                df_fato = df_for_core[["id_veiculo", "uf", "frota", "id_raw"]].copy()
+                logger.info(f"Step 13: Prepared {len(df_fato)} fato_frota rows")
+
+                logger.info("Step 14: Upserting into core.fato_frota_uf...")
+                rows_fato_upserted = upsert_fato_frota_uf(df_fato)
+                logger.info(f"Upserted {rows_fato_upserted} rows into core.fato_frota_uf (audit via trigger)")
 
         # Summary
         logger.info("")
@@ -182,9 +210,12 @@ def main():
             logger.info(f"Phase 1 - Rows loaded to raw: {rows_inserted} (staging.detran_vehicle_raw)")
         if rows_norm_inserted > 0:
             logger.info(f"Phase 2 - Rows loaded to norm: {rows_norm_inserted} (staging.detran_vehicle_norm)")
-        if rows_core_inserted > 0:
-            logger.info(f"Phase 3 - Rows upserted to core: {rows_core_inserted} (core.dim_detran_veiculo)")
-            logger.info(f"Phase 3 - Audit trail available in: core.audit_dim_detran_veiculo")
+        if rows_dim_upserted > 0:
+            logger.info(f"Phase 3 - Dim vehicles upserted: {rows_dim_upserted} (core.dim_veiculo_detran)")
+            logger.info(f"Phase 3 - Audit trail: core.audit_dim_veiculo_detran")
+        if rows_fato_upserted > 0:
+            logger.info(f"Phase 3 - Fato frota upserted: {rows_fato_upserted} (core.fato_frota_uf)")
+            logger.info(f"Phase 3 - Audit trail: core.audit_fato_frota_uf")
         logger.info("")
 
     except Exception as e:
