@@ -185,6 +185,31 @@ def read_raw_data(conn=None) -> pd.DataFrame:
             conn.close()
 
 
+def read_norm_data(conn=None) -> pd.DataFrame:
+    """
+    Read normalized data from staging.detran_vehicle_norm.
+
+    Args:
+        conn: Database connection (if None, creates new)
+
+    Returns:
+        DataFrame with normalized data (columns: uf, marca, modelo, ano_fabricacao, frota, descricao_detran, id_raw, ...)
+    """
+    if conn is None:
+        conn = get_db_connection_from_env()
+        close_conn = True
+    else:
+        close_conn = False
+
+    try:
+        query = "SELECT * FROM staging.detran_vehicle_norm"
+        df = pd.read_sql(query, conn)
+        return df
+    finally:
+        if close_conn:
+            conn.close()
+
+
 def load_normalized_to_staging(
     df: pd.DataFrame,
     table_name: str = "staging.detran_vehicle_norm",
