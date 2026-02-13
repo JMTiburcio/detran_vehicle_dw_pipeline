@@ -7,6 +7,7 @@ Normalize module - Normalize DETRAN vehicle raw data.
 - Loads to staging.detran_vehicle_norm
 """
 
+import re
 import pandas as pd
 from typing import Optional
 from pipeline.utils import get_db_connection_from_env, execute_sql_file
@@ -26,6 +27,8 @@ COL_UF = "UF"
 COL_MARCA_MODELO = "Marca Modelo"
 COL_ANO = "Ano Fabricação Veículo CRV"
 COL_QTD = "Qtd. Veículos"
+
+BRANDS = sorted(["ALFA ROMEO","JINBEI","LOTUS","D2D","INTERNATIONAL","MARCOPOLO","CHALLENGER","BIMOTA","PIAGGIO","XCMG","MAN","TVS","HAOBAO","CHAMONIX","DAYI","MALAGUTI","DAF","AUDI","YUKI","PORSCHE","KAHENA","BR JINMA","TINBOT","MATRA","HARVESTER","VOLTZ","HYUNDAI","LAMBORGHINI","CF MOTOS","LUQI","SCANIA","GMC","TROLLER","VOLKSWAGEN","GOWEI","SANTA MATILDE","AMAZONAS","MOTOCAR","JOHNNY PAG","SSANGYONG","MOTTU","FIAT ALLIS","FERRARI","CYKLOS","YAMAHA","INDIAN","BUDNY","LEAPMOTOR","GAC GROUP","SEAT","BRANDY","PUMA","SUPER SOCO","MG MOTORS","MANGOSTEEN","AITO","MITSUBISHI","HUSABERG","GEELY","NETA","MAJ","GENESIS","DFM","WUXI-GWS","WATTS","LAND ROVER","MOTRIZ","HUSQVARNA","TALARIA","ORIGEM","UNIVERSAL","HAFEI","ZEEKR","FNM","DAIHATSU","MV AGUSTA","REGAL RAPTOR","JOHN DEERE","KTM","PIONEIRA","FORD","CHRYSLER","HORWIN","CADILLAC","RAM","LEXUS","ENGESA","DENZA","FORA DA FROTA BRASILEIRA","FUTENGDA","ISUZU","ENVEMO","DAELIM","TAILING","NIU","MILETO","RENAULT","EFFA MOTORS","KENWORTH","JIAPENG VOLCANO","SMART","VMOTO","ANAIG","VENTO","BASHI MOTORS","JETOUR","DAYANG","SILENCE","CHANGAN","CASE IH","SANNYA MOTOR","NAO VEICULAR","BEE","MS ELETRIC","SUNDOWN","JAECOO","SUDU","SINO-GOLD","SMARDA","FIBRAVAN","DAMAC","JAGUAR","WAZN","MGW","BRILSTAR","VOLARE","IVECO","FOTON","MORMAII E-MOTORS","BUELL","DUCATI","KIA","BENTLEY","MASSEY FERGUSON","YADEA","MAZDA","HONDA","MAHINDRA","MONTESA 250","BUGRE","LAVRALE","EGO","CAGIVA","LIFAN","MOTO GUZZI","FENDT","DODGE","MVK","FLYELETRICS","XINGYUE","ROLLS-ROYCE","E-MART CAR","BORAM","PONTIAC","KUHN MONTANA","ROTOM","RIVIAN","WEHAWK","FUSCO MOTOSEGURA","GAS GAS","CALOI","BRM","OMODA","IMPLANOR","CAN-AM","LINCOLN","VESPA","CITROEN","MOTORINO","VALTRA","AGRALE","GLOOV","BRAVIA","MAFERSA","ASIA MOTORS","AIMA","WUYANG","HIGER","SUZUKI","JINYI","DAEWOO","AVELLOZ","BULL","NEW HOLLAND","BRILLIANCE","BAJAJ","YANMAR","ARROW MOBILITY S.A","CHANA","IDEAL","DAFRA","ROYAL ENFIELD","MIURA","ZONTES","GURGEL","WALK","CASE","BABY","TESLA","SWM","RIDDARA","HUMMER","STARA","MRX","TRAXX","MASERATI","ANKAI","MOTO MORINI","KYMCO","PETERBILT","AIPAO","SHINERAY","SYM","HYOSUNG","FYM","JAC","NISSAN","SANYANG","MIZA","MINI","PLA PULVERIZADORES","SUBARU","WAKE","ADLY","LEVA MOTORS","IROS","GWM","TOYOTA","LS TRACTOR","JPX","GREEN","HENREY","GREAT WALL MOTOR","CHERY","AUGURI","FANTIC","JACTO","JEEP","MOTO CHEFE","CHEVROLET","SHENGQI","SPARTAN","SERES","RELY","LUYUAN","PEUGEOT","CROSS LANDER","YAMASAKI","LANDINI","JAN","HARLEY-DAVIDSON","BYD","FYBER","DONGFENG","MCLAREN","DEUTZ","VENTANE MOTORS","SOUSA","SINOTRUK","VAMMO MOTOS","TRIUMPH","KAWASAKI","ARIIC","APRILIA","CBT","KASINSKI","AMAZON","GARINNI","WANGPAI","TAC","JIAYUAN","ASTON MARTIN","LADA","LVNENG E-BIKE","BSA","FEVER","SWM MOTORS","BENELLI","SHACMAN","LETIN","BUGATTI","GCX","HAOJIAN","ACURA","IANOR","FIAT","JONNY","BMW","VOLVO","LAFER","HAOJUE","MERCEDES BENZ"], key=len, reverse=True)
 
 # Dicionário de normalização de marcas
 BRAND_NORMALIZATION = {
@@ -52,6 +55,12 @@ BRAND_NORMALIZATION = {
     "MOTO TRAXX": "TRAXX",
     "IVECOFIAT": "IVECO",
 }
+
+def extrair_montadora(texto):
+    for marca in BRANDS:
+        if texto.startswith(marca):
+            return marca
+    return None
 
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -101,13 +110,47 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .str[0]
     )
     
-    # Aplicar normalização de marcas
-    work["MARCA"] = work["MARCA"].map(lambda x: BRAND_NORMALIZATION.get(x, x) if pd.notna(x) else x)
-    
     work["Marca Modelo s/ marca"] = (
         work["Marca Modelo s/ importado"]
         .str.replace(r"^[^/]+/", "", regex=True)
     )
+
+    df_importados = work[work['IMPORTADO']]
+    df_importados['MARCA'] = df_importados['Marca Modelo s/ marca'].apply(extrair_montadora)
+
+    df_importados['Marca Modelo s/ marca'] = df_importados.apply(
+        lambda row: re.sub(
+            r'^' + re.escape(row['MARCA']) + r'\s*',
+            '',
+            row['Marca Modelo s/ marca']
+        ) if pd.notna(row['MARCA']) else row['Marca Modelo s/ marca'],
+        axis=1
+    )
+
+    mask_imp = work['MARCA'] == 'IMP'
+    work.loc[mask_imp, 'IMPORTADO'] = True
+    work.loc[mask_imp, 'MARCA'] = (
+        work.loc[mask_imp, 'Marca Modelo s/ marca']
+        .apply(extrair_montadora)
+    )
+    work.loc[mask_imp, 'Marca Modelo s/ marca'] = (
+        work.loc[mask_imp]
+    )
+
+    work.loc[mask_imp, 'Marca Modelo s/ marca'] = (
+        work.loc[mask_imp]
+        .apply(
+            lambda row: re.sub(
+                r'^' + re.escape(row['MARCA']) + r'\s*',
+                '',
+                row['Marca Modelo s/ marca']
+            ) if pd.notna(row['MARCA']) else row['Marca Modelo s/ marca'],
+            axis=1
+        )
+    )
+
+    work["MARCA"] = work["MARCA"].map(lambda x: BRAND_NORMALIZATION.get(x, x) if pd.notna(x) else x)
+    
     work["ARTESANAL"] = work["MARCA"].str.startswith("A.", na=False)
 
     resumo = (
@@ -120,7 +163,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     work = work.dropna(subset=['MARCA'])
 
     if work.empty:
-        return pd.DataFrame(columns=["uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "id_raw"])
+        return pd.DataFrame(columns=["uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "importado", "id_raw"])
 
     columns_map = {
         COL_UF: "uf",
@@ -129,8 +172,9 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         COL_ANO: "ano_fabricacao",
         COL_QTD: "frota",
         COL_MARCA_MODELO: "descricao_detran",
+        "IMPORTADO": "importado",
     }
-    out_cols = [COL_UF, "MARCA", COL_MARCA_MODELO, "Marca Modelo s/ marca", COL_ANO, COL_QTD]
+    out_cols = [COL_UF, "MARCA", COL_MARCA_MODELO, "Marca Modelo s/ marca", COL_ANO, COL_QTD, "IMPORTADO"]
     df_final = work[out_cols + [RAW_ID]].rename(columns=columns_map)
     df_final = df_final.rename(columns={RAW_ID: "id_raw"})
     return df_final
@@ -268,7 +312,7 @@ def load_normalized_to_staging(
         if len(df) == 0:
             return 0
 
-        columns = ["uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "id_raw"]
+        columns = ["uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "id_raw", "importado"]
         values = []
         for _, row in df.iterrows():
             row_values = []
