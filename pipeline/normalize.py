@@ -116,18 +116,25 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .str.replace(r"^[^/]+/", "", regex=True)
     )
 
-    df_importados = work[work['IMPORTADO']]
-    df_importados['MARCA'] = df_importados['Marca Modelo s/ marca'].apply(extrair_montadora)
+    mask_importados = work['IMPORTADO']
 
-    df_importados['Marca Modelo s/ marca'] = df_importados.apply(
-        lambda row: re.sub(
-            r'^' + re.escape(row['MARCA']) + r'\s*',
-            '',
-            row['Marca Modelo s/ marca']
-        ) if pd.notna(row['MARCA']) else row['Marca Modelo s/ marca'],
-        axis=1
+    work.loc[mask_importados, 'MARCA'] = (
+        work.loc[mask_importados, 'Marca Modelo s/ marca']
+        .apply(extrair_montadora)
     )
 
+    work.loc[mask_importados, 'Marca Modelo s/ marca'] = (
+        work.loc[mask_importados]
+        .apply(
+            lambda row: re.sub(
+                r'^' + re.escape(row['MARCA']) + r'\s*',
+                '',
+                row['Marca Modelo s/ marca']
+            ) if pd.notna(row['MARCA']) else row['Marca Modelo s/ marca'],
+            axis=1
+        )
+    )
+    
     mask_imp = work['MARCA'] == 'IMP'
     work.loc[mask_imp, 'IMPORTADO'] = True
     work.loc[mask_imp, 'MARCA'] = (
