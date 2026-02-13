@@ -33,6 +33,7 @@ from pipeline.normalize import (
 )
 from pipeline.transform import (
     ensure_core_detran_tables_exist,
+    truncate_core_tables,
     prepare_dim_veiculo_from_norm,
     upsert_dim_veiculo_detran,
     get_id_veiculo_from_hashes,
@@ -155,6 +156,10 @@ def main():
                 logger.info("Created dim_veiculo_detran, fato_frota_uf")
             if not core_schema_created and not core_tables_created:
                 logger.info("Core schema and tables already exist")
+
+            logger.info("Step 8.5: Truncating core tables (dim_veiculo_detran, fato_frota_uf)...")
+            truncate_core_tables()
+            logger.info("Core tables truncated")
 
             # Read norm data: if we ran Phase 2, use df_norm in memory; else read from DB
             if opts.start_from <= PHASE_NORMALIZE and len(df_norm) > 0:

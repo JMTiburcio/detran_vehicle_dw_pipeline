@@ -361,6 +361,38 @@ def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connectio
             conn.close()
 
 
+def truncate_core_tables(conn: Optional[psycopg2.extensions.connection] = None) -> None:
+    """
+    Truncate core tables (for full reprocessing).
+
+    Truncates fato_frota_uf first (FK to dim), then dim_veiculo_detran.
+    Uses RESTART IDENTITY to reset sequences (id_veiculo, id_fato).
+
+    Args:
+        conn: Database connection (if None, creates new)
+    """
+    if conn is None:
+        conn = get_db_connection_from_env()
+        close_conn = True
+    else:
+        close_conn = False
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "TRUNCATE TABLE core.fato_frota_uf, core.dim_veiculo_detran RESTART IDENTITY CASCADE;"
+            )
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise Exception(f"Error truncating core tables: {str(e)}") from e
+        finally:
+            cursor.close()
+    finally:
+        if close_conn:
+            conn.close()
+
+
 def _row_to_dim_veiculo_values(row: pd.Series) -> tuple:
     """Build tuple for dim_veiculo_detran."""
     return tuple(row.get(col) if not pd.isna(row.get(col)) else None for col in DIM_VEICULO_COLUMNS)
