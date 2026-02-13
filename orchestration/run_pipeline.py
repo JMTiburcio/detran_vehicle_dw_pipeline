@@ -199,8 +199,13 @@ def main():
                 df_for_core = df_for_core.merge(df_id_map, on="hash_veiculo", how="left")
 
                 # Build fato DataFrame: id_veiculo, uf, frota, id_raw
-                df_fato = df_for_core[["id_veiculo", "uf", "frota", "id_raw"]].copy()
-                logger.info(f"Step 13: Prepared {len(df_fato)} fato_frota rows")
+                # Aggregate by (id_veiculo, uf) summing frota (same vehicle+UF can appear as importado true/false in norm)
+                df_fato = (
+                    df_for_core[["id_veiculo", "uf", "frota", "id_raw"]]
+                    .groupby(["id_veiculo", "uf"], as_index=False)
+                    .agg({"frota": "sum", "id_raw": "max"})
+                )
+                logger.info(f"Step 13: Prepared {len(df_fato)} fato_frota rows (aggregated by id_veiculo+uf)")
 
                 logger.info("Step 14: Upserting into core.fato_frota_uf...")
                 rows_fato_upserted = upsert_fato_frota_uf(df_fato)
