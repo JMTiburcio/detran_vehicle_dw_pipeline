@@ -8,6 +8,7 @@ Normalize module - Normalize DETRAN vehicle raw data.
 """
 
 import re
+import numpy as np
 import pandas as pd
 from typing import Optional
 from pipeline.utils import get_db_connection_from_env, execute_sql_file
@@ -160,6 +161,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
     marcas_validas = resumo[resumo > 10]
     work = work[work["MARCA"].isin(marcas_validas.index)]
+    work[['MARCA', 'Marca Modelo s/ marca']] = work[['MARCA', 'Marca Modelo s/ marca']].replace('', np.nan)
     work = work.dropna(subset=['MARCA', 'Marca Modelo s/ marca'])
 
     if work.empty:

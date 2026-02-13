@@ -3,8 +3,7 @@ Transform module - Transform data for core layer.
 
 This module handles:
 - Hash generation for unique record identification (hash_veiculo)
-- Upsert into core.dim_veiculo (INSERT if hash doesn't exist, UPDATE if exists)
-- Trigger on dim_veiculo automatically writes history to core.audit_dim_veiculo
+- Upsert into core.dim_veiculo_detran and core.fato_frota_uf (INSERT/UPDATE by key)
 """
 
 import hashlib
@@ -313,7 +312,7 @@ def prepare_dim_veiculo_from_norm(df_norm: pd.DataFrame) -> pd.DataFrame:
 
 def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connection] = None) -> Tuple[bool, bool]:
     """
-    Ensure core schema and DETRAN tables (dim_veiculo_detran, fato_frota_uf, audits, triggers).
+    Ensure core schema and DETRAN tables (dim_veiculo_detran, fato_frota_uf).
 
     Returns:
         (schema_created: bool, tables_created: bool)
@@ -355,30 +354,40 @@ def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connectio
             execute_sql_file(str(base / "03_create_fato_frota_uf.sql"), conn)
             tables_created = True
 
-        # 04 - audit_dim_veiculo_detran
-        cursor.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_schema = 'core' AND table_name = 'audit_dim_veiculo_detran'
-        """)
-        if cursor.fetchone() is None:
-            execute_sql_file(str(base / "04_create_audit_dim_veiculo.sql"), conn)
-            tables_created = True
-
-        # 05 - audit_fato_frota_uf
-        cursor.execute("""
-            SELECT table_name FROM information_schema.tables
-            WHERE table_schema = 'core' AND table_name = 'audit_fato_frota_uf'
-        """)
-        if cursor.fetchone() is None:
-            execute_sql_file(str(base / "05_create_audit_fato_frota.sql"), conn)
-            tables_created = True
-
-        # 06 & 07 - Triggers (recreate to keep in sync)
-        execute_sql_file(str(base / "06_create_trigger_dim_veiculo.sql"), conn)
-        execute_sql_file(str(base / "07_create_trigger_fato_frota.sql"), conn)
-
         cursor.close()
         return schema_created, tables_created
+    finally:
+        if close_conn:
+            conn.close()
+
+
+def truncate_core_tables(conn: Optional[psycopg2.extensions.connection] = None) -> None:
+    """
+    Truncate core tables (for full reprocessing).
+
+    Truncates fato_frota_uf first (FK to dim), then dim_veiculo_detran.
+    Uses RESTART IDENTITY to reset sequences (id_veiculo, id_fato).
+
+    Args:
+        conn: Database connection (if None, creates new)
+    """
+    if conn is None:
+        conn = get_db_connection_from_env()
+        close_conn = True
+    else:
+        close_conn = False
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "TRUNCATE TABLE core.fato_frota_uf, core.dim_veiculo_detran RESTART IDENTITY CASCADE;"
+            )
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise Exception(f"Error truncating core tables: {str(e)}") from e
+        finally:
+            cursor.close()
     finally:
         if close_conn:
             conn.close()
