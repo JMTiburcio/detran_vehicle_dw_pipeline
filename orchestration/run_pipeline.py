@@ -8,7 +8,7 @@ PHASE 2: Normalize + Load to staging.detran_vehicle_norm
 - Read from staging.detran_vehicle_raw, normalize (marca/modelo, valid brands), load to staging.detran_vehicle_norm
 
 PHASE 3: Core (dimensional model)
-- Ensure core schema and tables (dim_veiculo_detran, fato_frota_uf, audits, triggers)
+- Ensure core schema and tables (dim_veiculo_detran, fato_frota_uf)
 - Extract unique vehicles from norm, upsert into dim_veiculo_detran
 - Extract frota facts (uf, frota per vehicle), upsert into fato_frota_uf
 
@@ -152,7 +152,7 @@ def main():
             if core_schema_created:
                 logger.info("Created core schema")
             if core_tables_created:
-                logger.info("Created dim_veiculo_detran, fato_frota_uf, audits, triggers")
+                logger.info("Created dim_veiculo_detran, fato_frota_uf")
             if not core_schema_created and not core_tables_created:
                 logger.info("Core schema and tables already exist")
 
@@ -199,7 +199,7 @@ def main():
 
                 logger.info("Step 14: Upserting into core.fato_frota_uf...")
                 rows_fato_upserted = upsert_fato_frota_uf(df_fato)
-                logger.info(f"Upserted {rows_fato_upserted} rows into core.fato_frota_uf (audit via trigger)")
+                logger.info(f"Upserted {rows_fato_upserted} rows into core.fato_frota_uf")
 
         # Summary
         logger.info("")
@@ -212,10 +212,8 @@ def main():
             logger.info(f"Phase 2 - Rows loaded to norm: {rows_norm_inserted} (staging.detran_vehicle_norm)")
         if rows_dim_upserted > 0:
             logger.info(f"Phase 3 - Dim vehicles upserted: {rows_dim_upserted} (core.dim_veiculo_detran)")
-            logger.info(f"Phase 3 - Audit trail: core.audit_dim_veiculo_detran")
         if rows_fato_upserted > 0:
             logger.info(f"Phase 3 - Fato frota upserted: {rows_fato_upserted} (core.fato_frota_uf)")
-            logger.info(f"Phase 3 - Audit trail: core.audit_fato_frota_uf")
         logger.info("")
 
     except Exception as e:
