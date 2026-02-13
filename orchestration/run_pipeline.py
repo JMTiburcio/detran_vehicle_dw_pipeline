@@ -57,7 +57,7 @@ def main():
     logger.info("=" * 80)
     logger.info("DETRAN VEHICLE DW PIPELINE")
     logger.info("=" * 80)
-    logger.info(f"Starting from phase: {opts.start_from_name}")
+    logger.info(f"Starting from phase: {opts.start_from_name}, stopping at: {opts.stop_at_name}")
 
     rows_inserted = None
     df_raw = pd.DataFrame()
@@ -70,7 +70,7 @@ def main():
         # ---------------------------------------------------------------------
         # PHASE 1: Extract + Load Raw
         # ---------------------------------------------------------------------
-        if opts.start_from <= PHASE_RAW:
+        if opts.start_from <= PHASE_RAW and opts.stop_at >= PHASE_RAW:
             input_dir = "data/input"
             csv_files = list_csv_files(input_dir)
             if not csv_files:
@@ -106,7 +106,7 @@ def main():
         # ---------------------------------------------------------------------
         # PHASE 2: Normalize (read from raw, load to norm)
         # ---------------------------------------------------------------------
-        if opts.start_from <= PHASE_NORMALIZE:
+        if opts.start_from <= PHASE_NORMALIZE and opts.stop_at >= PHASE_NORMALIZE:
             logger.info("")
             logger.info("=" * 80)
             logger.info("PHASE 2: Normalize + Load to staging.detran_vehicle_norm")
@@ -141,7 +141,7 @@ def main():
         # ---------------------------------------------------------------------
         # PHASE 3: Core (dimensional: dim_veiculo + fato_frota)
         # ---------------------------------------------------------------------
-        if opts.start_from <= PHASE_CORE:
+        if opts.start_from <= PHASE_CORE and opts.stop_at >= PHASE_CORE:
             logger.info("")
             logger.info("=" * 80)
             logger.info("PHASE 3: Transform to core (dim_veiculo_detran + fato_frota_uf)")

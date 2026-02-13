@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS staging.detran_vehicle_norm (
     ano_fabricacao INTEGER,
     frota INTEGER,
     descricao_detran VARCHAR(255),
+    importado BOOLEAN,
     -- Metadata
     data_carga TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     id_raw INTEGER REFERENCES staging.detran_vehicle_raw(id_raw)
