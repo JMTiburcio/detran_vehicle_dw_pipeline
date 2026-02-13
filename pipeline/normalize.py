@@ -154,7 +154,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     work["ARTESANAL"] = work["MARCA"].str.startswith("A.", na=False)
 
     resumo = (
-        work[(~work["ARTESANAL"]) & (~work["IMPORTADO"])]
+        work[(~work["ARTESANAL"])]
         .groupby("MARCA", dropna=False)[COL_QTD]
         .sum()
     )
