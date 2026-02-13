@@ -160,7 +160,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
     marcas_validas = resumo[resumo > 10]
     work = work[work["MARCA"].isin(marcas_validas.index)]
-    work = work.dropna(subset=['MARCA'])
+    work = work.dropna(subset=['MARCA', 'Marca Modelo s/ marca'])
 
     if work.empty:
         return pd.DataFrame(columns=["uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "importado", "id_raw"])
