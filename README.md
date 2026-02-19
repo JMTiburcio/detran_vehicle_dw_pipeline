@@ -14,7 +14,7 @@ Excel (Fraga) → staging → core → analytics → BI
 
 - `staging` - Dados crus e intermediários
 - `core` - Dados confiáveis, modelados e históricos
-- `analytics` - Views/tabelas prontas para BI
+- `analytics` - Réplicas estáveis do core para BI (atualizadas por swap atômico); consumir `analytics.dim_veiculo_detran` e `analytics.fato_frota_uf` diretamente. Ver [docs/analytics_bi.md](docs/analytics_bi.md).
 
 ## Estrutura do Projeto
 
