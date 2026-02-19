@@ -8,7 +8,7 @@ staging.detran_vehicle_raw table.
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
-from typing import Optional
+from typing import Optional, Tuple
 from pathlib import Path
 import os
 from dotenv import load_dotenv
@@ -48,60 +48,76 @@ def create_staging_schemas(conn):
         cursor.close()
 
 
-def ensure_staging_table_exists(conn=None):
+def _raw_partition_name(report_period: int) -> str:
+    """Return partition table name for raw (e.g. detran_vehicle_raw_202501)."""
+    return f"detran_vehicle_raw_{report_period}"
+
+
+def ensure_staging_table_exists(
+    report_period: int,
+    conn: Optional[psycopg2.extensions.connection] = None,
+) -> Tuple[bool, bool]:
     """
-    Ensure staging schema and detran_vehicle_raw table exist.
-    Creates them if they don't exist.
-    
+    Ensure staging schema, detran_vehicle_raw partitioned table, and the
+    partition for report_period exist. Creates them if they don't exist.
+
     Args:
+        report_period: Report period YYYYMM (e.g. 202501)
         conn: Database connection (if None, creates new)
-        
+
     Returns:
         tuple: (schema_created: bool, table_created: bool)
     """
     from pipeline.utils import get_db_connection_from_env, execute_sql_file
     from pathlib import Path
-    
+
     if conn is None:
         conn = get_db_connection_from_env()
         close_conn = True
     else:
         close_conn = False
-    
+
     try:
         cursor = conn.cursor()
         schema_created = False
         table_created = False
-        
-        # Check if schema exists
+
         cursor.execute("""
-            SELECT schema_name 
-            FROM information_schema.schemata 
+            SELECT schema_name
+            FROM information_schema.schemata
             WHERE schema_name = 'staging'
         """)
-        schema_exists = cursor.fetchone() is not None
-        
-        if not schema_exists:
+        if cursor.fetchone() is None:
             create_staging_schemas(conn)
             schema_created = True
-        
-        # Check if table exists
+
         cursor.execute("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'staging' 
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'staging'
             AND table_name = 'detran_vehicle_raw'
         """)
-        table_exists = cursor.fetchone() is not None
-        
-        if not table_exists:
+        if cursor.fetchone() is None:
             sql_file = Path(__file__).parent.parent / "sql" / "staging" / "02_create_raw_table.sql"
             execute_sql_file(str(sql_file), conn)
             table_created = True
-        
+
+        # Ensure partition for report_period exists
+        part_name = _raw_partition_name(report_period)
+        cursor.execute("""
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'staging' AND tablename = %s
+        """, (part_name,))
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS staging." + part_name + " PARTITION OF staging.detran_vehicle_raw FOR VALUES IN (%s)",
+                (report_period,),
+            )
+            conn.commit()
+
         cursor.close()
         return schema_created, table_created
-        
+
     finally:
         if close_conn:
             conn.close()
@@ -109,16 +125,18 @@ def ensure_staging_table_exists(conn=None):
 
 def load_raw_data(
     df: pd.DataFrame,
+    report_period: int,
     table_name: str = "staging.detran_vehicle_raw",
     source_file: Optional[str] = None,
-    conn: Optional[psycopg2.extensions.connection] = None
+    conn: Optional[psycopg2.extensions.connection] = None,
 ) -> int:
     """
-    Load raw DataFrame into staging table.
+    Load raw DataFrame into staging table (partition for report_period).
 
     Args:
         df: DataFrame with raw data from DETRAN CSV
-        table_name: Target table name
+        report_period: Report period YYYYMM (e.g. 202501)
+        table_name: Target table name (parent partitioned table)
         source_file: Path to source CSV file (for metadata)
         conn: Database connection (if None, creates new)
 
@@ -127,16 +145,14 @@ def load_raw_data(
     """
     import unicodedata
     import re
-    
-    # Get or create connection
+
     if conn is None:
         conn = get_db_connection()
         close_conn = True
     else:
         close_conn = False
-    
+
     try:
-        # Normalize column names (same logic as analyze_excel.py)
         def normalize_column_name(col_name: str) -> str:
             normalized = col_name.lower()
             normalized = unicodedata.normalize('NFD', normalized)
@@ -146,38 +162,30 @@ def load_raw_data(
             normalized = re.sub(r'_+', '_', normalized)
             normalized = normalized.strip('_')
             return normalized if normalized else 'coluna_' + str(hash(col_name) % 10000)
-        
-        # Create mapping from Excel columns to SQL columns
+
         column_mapping = {}
         for excel_col in df.columns:
-            sql_col = normalize_column_name(excel_col)
-            column_mapping[excel_col] = sql_col
-        
-        # Prepare DataFrame with normalized column names
+            column_mapping[excel_col] = normalize_column_name(excel_col)
+
         df_mapped = df.copy()
         df_mapped.rename(columns=column_mapping, inplace=True)
-        
-        # Add metadata columns
+
         source_file_name = Path(source_file).name if source_file else None
         df_mapped['source_file'] = source_file_name
-        df_mapped['csv_row'] = range(2, len(df_mapped) + 2)  # CSV rows: 1 = header, data from 2
-        
-        # Get list of SQL columns (excluding id_raw which is SERIAL)
-        sql_columns = [col for col in df_mapped.columns if col not in ['id_raw']]
-        
-        # Prepare data for insertion
-        # Raw table stores everything as text (VARCHAR) to preserve original format
-        # Type conversion will be done in normalized table (Phase 2)
+        df_mapped['csv_row'] = range(2, len(df_mapped) + 2)
+
+        sql_columns = ['report_period'] + [col for col in df_mapped.columns if col not in ['id_raw']]
+
         values = []
         for _, row in df_mapped.iterrows():
-            row_values = []
-            for col in sql_columns:
+            row_values = [report_period]
+            for col in df_mapped.columns:
+                if col == 'id_raw':
+                    continue
                 val = row[col]
-                # Convert to string, preserving original format
                 if pd.isna(val):
                     row_values.append(None)
                 else:
-                    # Store as string (raw data, no conversion)
                     row_values.append(str(val).strip() if str(val).strip() else None)
             values.append(tuple(row_values))
         
@@ -209,18 +217,21 @@ def load_raw_data(
             conn.close()
 
 
-def truncate_staging_table(
-    table_name: str = "staging.detran_vehicle_raw",
-    conn: Optional[psycopg2.extensions.connection] = None
-):
-    """
-    Truncate staging table (for reprocessing).
+def _norm_partition_name(report_period: int) -> str:
+    """Return partition table name for norm (e.g. detran_vehicle_norm_202501)."""
+    return f"detran_vehicle_norm_{report_period}"
 
-    Uses CASCADE so that tables referencing this one (e.g. detran_vehicle_norm
-    referencing detran_vehicle_raw) are truncated in the same command.
-    
+
+def truncate_staging_table(
+    report_period: int,
+    conn: Optional[psycopg2.extensions.connection] = None,
+) -> None:
+    """
+    Truncate only the staging partitions for the given report_period.
+    Order: norm partition first (FK to raw), then raw partition.
+
     Args:
-        table_name: Table to truncate
+        report_period: Report period YYYYMM (e.g. 202501)
         conn: Database connection (if None, creates new)
     """
     if conn is None:
@@ -228,15 +239,18 @@ def truncate_staging_table(
         close_conn = True
     else:
         close_conn = False
-    
+
     try:
         cursor = conn.cursor()
         try:
-            cursor.execute(f"TRUNCATE TABLE {table_name} CASCADE;")
+            norm_part = _norm_partition_name(report_period)
+            raw_part = _raw_partition_name(report_period)
+            cursor.execute(f"TRUNCATE TABLE staging.{norm_part} CASCADE;")
+            cursor.execute(f"TRUNCATE TABLE staging.{raw_part} CASCADE;")
             conn.commit()
         except Exception as e:
             conn.rollback()
-            raise Exception(f"Error truncating table: {str(e)}")
+            raise Exception(f"Error truncating staging partitions: {str(e)}") from e
         finally:
             cursor.close()
     finally:
