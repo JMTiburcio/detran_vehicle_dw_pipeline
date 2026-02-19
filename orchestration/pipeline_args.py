@@ -6,15 +6,17 @@ Keeps run_pipeline.py free of argparse logic.
 import argparse
 import re
 
-# Phase order: 1 = raw, 2 = normalize, 3 = core
+# Phase order: 1 = raw, 2 = normalize, 3 = core, 4 = analytics
 PHASE_RAW = 1
 PHASE_NORMALIZE = 2
 PHASE_CORE = 3
+PHASE_ANALYTICS = 4
 
 PHASE_NAMES = {
     PHASE_RAW: "raw",
     PHASE_NORMALIZE: "normalize",
     PHASE_CORE: "core",
+    PHASE_ANALYTICS: "analytics",
 }
 
 
@@ -45,17 +47,17 @@ def parse_pipeline_args(argv=None):
     )
     parser.add_argument(
         "--start-from",
-        choices=["raw", "normalize", "core"],
+        choices=["raw", "normalize", "core", "analytics"],
         default="raw",
         metavar="PHASE",
-        help="Phase to start from: raw (extract+load raw), normalize (read raw, normalize, load norm), core",
+        help="Phase to start from: raw, normalize, core, analytics",
     )
     parser.add_argument(
         "--stop-at",
-        choices=["raw", "normalize", "core"],
-        default="core",
+        choices=["raw", "normalize", "core", "analytics"],
+        default="analytics",
         metavar="PHASE",
-        help="Last phase to run (inclusive). E.g. --stop-at normalize runs raw then normalize, skips core.",
+        help="Last phase to run (inclusive). E.g. --stop-at core skips analytics refresh.",
     )
     parser.add_argument(
         "--period",
@@ -66,7 +68,7 @@ def parse_pipeline_args(argv=None):
     )
     args = parser.parse_args(argv)
 
-    name_to_phase = {"raw": PHASE_RAW, "normalize": PHASE_NORMALIZE, "core": PHASE_CORE}
+    name_to_phase = {"raw": PHASE_RAW, "normalize": PHASE_NORMALIZE, "core": PHASE_CORE, "analytics": PHASE_ANALYTICS}
     start_from = name_to_phase[args.start_from]
     stop_at = name_to_phase[args.stop_at]
 

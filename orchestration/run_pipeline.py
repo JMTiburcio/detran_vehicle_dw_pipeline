@@ -12,7 +12,8 @@ PHASE 3: Core (dimensional model)
 - Extract unique vehicles from norm, upsert into dim_veiculo_detran
 - Extract frota facts (uf, frota per vehicle), upsert into fato_frota_uf
 
-TODO: Phase 4 - Validate + Analytics
+PHASE 4: Analytics
+- Refresh analytics schema (stable replicas for BI) by atomic swap from core
 """
 
 import sys
@@ -21,7 +22,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from orchestration.pipeline_args import parse_pipeline_args, PHASE_RAW, PHASE_NORMALIZE, PHASE_CORE
+from orchestration.pipeline_args import parse_pipeline_args, PHASE_RAW, PHASE_NORMALIZE, PHASE_CORE, PHASE_ANALYTICS
 from pipeline.extract import read_csv_file, validate_csv_structure, list_csv_files, resolve_period_and_input_dir
 from pipeline.load import load_raw_data, ensure_staging_table_exists, truncate_staging_table
 from pipeline.normalize import (
@@ -39,6 +40,7 @@ from pipeline.transform import (
     get_id_veiculo_from_hashes,
     upsert_fato_frota_uf,
 )
+from pipeline.analytics import refresh_analytics_from_core
 from pipeline.utils import setup_logging
 import os
 import pandas as pd
@@ -217,6 +219,18 @@ def main():
                 rows_fato_upserted = upsert_fato_frota_uf(df_fato, report_period=report_period)
                 logger.info(f"Upserted {rows_fato_upserted} rows into core.fato_frota_uf")
 
+        # ---------------------------------------------------------------------
+        # PHASE 4: Analytics (stable replicas for BI, atomic swap)
+        # ---------------------------------------------------------------------
+        if opts.start_from <= PHASE_ANALYTICS and opts.stop_at >= PHASE_ANALYTICS:
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("PHASE 4: Refresh analytics (stable replicas for BI)")
+            logger.info("=" * 80)
+            logger.info("Step 15: Copying core to analytics and swapping...")
+            refresh_analytics_from_core()
+            logger.info("Analytics tables refreshed (analytics.dim_veiculo_detran, analytics.fato_frota_uf)")
+
         # Summary
         logger.info("")
         logger.info("=" * 80)
@@ -230,6 +244,8 @@ def main():
             logger.info(f"Phase 3 - Dim vehicles upserted: {rows_dim_upserted} (core.dim_veiculo_detran)")
         if rows_fato_upserted > 0:
             logger.info(f"Phase 3 - Fato frota upserted: {rows_fato_upserted} (core.fato_frota_uf)")
+        if opts.stop_at >= PHASE_ANALYTICS:
+            logger.info("Phase 4 - Analytics refreshed (analytics.dim_veiculo_detran, analytics.fato_frota_uf)")
         logger.info("")
 
     except Exception as e:
