@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from orchestration.pipeline_args import parse_pipeline_args, PHASE_RAW, PHASE_NORMALIZE, PHASE_CORE
-from pipeline.extract import read_csv_file, validate_csv_structure, list_csv_files
+from pipeline.extract import read_csv_file, validate_csv_structure, list_csv_files, resolve_period_and_input_dir
 from pipeline.load import load_raw_data, ensure_staging_table_exists, truncate_staging_table
 from pipeline.normalize import (
     ensure_norm_table_exists,
@@ -60,6 +60,13 @@ def main():
     logger.info("=" * 80)
     logger.info(f"Starting from phase: {opts.start_from_name}, stopping at: {opts.stop_at_name}")
 
+    try:
+        report_period, input_dir = resolve_period_and_input_dir("data/input", opts.period)
+        logger.info(f"Report period: {report_period} (directory: {input_dir})")
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
     rows_inserted = None
     df_raw = pd.DataFrame()
     df_norm = pd.DataFrame()
@@ -72,8 +79,7 @@ def main():
         # PHASE 1: Extract + Load Raw
         # ---------------------------------------------------------------------
         if opts.start_from <= PHASE_RAW and opts.stop_at >= PHASE_RAW:
-            input_dir = "data/input"
-            csv_files = list_csv_files(input_dir)
+            csv_files = list_csv_files(str(input_dir))
             if not csv_files:
                 logger.error(f"No CSV files found in {input_dir}")
                 sys.exit(1)
@@ -82,8 +88,9 @@ def main():
             csv_file = Path(csv_files[0])
             logger.info(f"CSV file: {csv_file.name} (from {input_dir}/)")
 
-            logger.info("Step 0: Ensuring staging schema and raw table exist...")
-            schema_created, table_created = ensure_staging_table_exists()
+            logger.info("Step 0: Ensuring staging schema and raw/norm tables (partitions) exist...")
+            schema_created, table_created = ensure_staging_table_exists(report_period)
+            ensure_norm_table_exists(report_period)  # norm partition must exist before truncate
             if schema_created:
                 logger.info("Created staging schema")
             if table_created:
@@ -96,11 +103,11 @@ def main():
             logger.info(f"Extracted {len(df)} rows and {len(df.columns)} columns")
             logger.info("Step 2: Validating CSV structure...")
             validate_csv_structure(df)
-            logger.info("Step 2.5: Truncating staging table...")
-            truncate_staging_table()
+            logger.info("Step 2.5: Truncating staging partitions for period...")
+            truncate_staging_table(report_period)
             logger.info("Step 3: Loading data into staging.detran_vehicle_raw...")
             rows_inserted = load_raw_data(
-                df, source_file=str(csv_file.absolute()), conn=None
+                df, report_period=report_period, source_file=str(csv_file.absolute()), conn=None
             )
             logger.info(f"Inserted {rows_inserted} rows into staging.detran_vehicle_raw")
 
@@ -113,8 +120,9 @@ def main():
             logger.info("PHASE 2: Normalize + Load to staging.detran_vehicle_norm")
             logger.info("=" * 80)
 
-            logger.info("Step 4: Ensuring staging.detran_vehicle_norm table exists...")
-            schema_created, table_created = ensure_norm_table_exists()
+            logger.info("Step 4: Ensuring staging raw/norm tables (partitions) exist...")
+            ensure_staging_table_exists(report_period)  # raw partition must exist to read from it
+            schema_created, table_created = ensure_norm_table_exists(report_period)
             if schema_created:
                 logger.info("Created staging schema")
             if table_created:
@@ -123,7 +131,7 @@ def main():
                 logger.info("Schema and table already exist")
 
             logger.info("Step 5: Reading data from staging.detran_vehicle_raw...")
-            df_raw = read_raw_data()
+            df_raw = read_raw_data(conn=None, report_period=report_period)
             logger.info(f"Read {len(df_raw)} rows from staging.detran_vehicle_raw")
 
             if len(df_raw) == 0:
@@ -133,10 +141,8 @@ def main():
                 df_norm = normalize_dataframe(df_raw)
                 logger.info(f"Normalized: {len(df_norm)} rows")
                 if len(df_norm) > 0:
-                    logger.info("Step 6.5: Truncating staging.detran_vehicle_norm...")
-                    truncate_staging_table(table_name="staging.detran_vehicle_norm")
                     logger.info("Step 7: Loading normalized data into staging.detran_vehicle_norm...")
-                    rows_norm_inserted = load_normalized_to_staging(df_norm)
+                    rows_norm_inserted = load_normalized_to_staging(df_norm, report_period=report_period)
                     logger.info(f"Inserted {rows_norm_inserted} rows into staging.detran_vehicle_norm")
 
         # ---------------------------------------------------------------------
@@ -148,8 +154,8 @@ def main():
             logger.info("PHASE 3: Transform to core (dim_veiculo_detran + fato_frota_uf)")
             logger.info("=" * 80)
 
-            logger.info("Step 8: Ensuring core schema and tables exist...")
-            core_schema_created, core_tables_created = ensure_core_detran_tables_exist()
+            logger.info("Step 8: Ensuring core schema and tables (fato partition) exist...")
+            core_schema_created, core_tables_created = ensure_core_detran_tables_exist(report_period)
             if core_schema_created:
                 logger.info("Created core schema")
             if core_tables_created:
@@ -157,17 +163,17 @@ def main():
             if not core_schema_created and not core_tables_created:
                 logger.info("Core schema and tables already exist")
 
-            logger.info("Step 8.5: Truncating core tables (dim_veiculo_detran, fato_frota_uf)...")
-            truncate_core_tables()
-            logger.info("Core tables truncated")
+            logger.info("Step 8.5: Truncating fato_frota_uf partition for period...")
+            truncate_core_tables(report_period)
+            logger.info("Fato partition truncated")
 
-            # Read norm data: if we ran Phase 2, use df_norm in memory; else read from DB
+            # Read norm data: if we ran Phase 2, use df_norm in memory; else read from DB (for this period)
             if opts.start_from <= PHASE_NORMALIZE and len(df_norm) > 0:
                 df_for_core = df_norm
                 logger.info(f"Step 9: Using {len(df_for_core)} rows from Phase 2 (in memory)")
             else:
                 logger.info("Step 9: Reading data from staging.detran_vehicle_norm...")
-                df_for_core = read_norm_data()
+                df_for_core = read_norm_data(conn=None, report_period=report_period)
                 logger.info(f"Read {len(df_for_core)} rows from staging.detran_vehicle_norm")
 
             if len(df_for_core) == 0:
@@ -208,7 +214,7 @@ def main():
                 logger.info(f"Step 13: Prepared {len(df_fato)} fato_frota rows (aggregated by id_veiculo+uf)")
 
                 logger.info("Step 14: Upserting into core.fato_frota_uf...")
-                rows_fato_upserted = upsert_fato_frota_uf(df_fato)
+                rows_fato_upserted = upsert_fato_frota_uf(df_fato, report_period=report_period)
                 logger.info(f"Upserted {rows_fato_upserted} rows into core.fato_frota_uf")
 
         # Summary

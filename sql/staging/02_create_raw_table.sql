@@ -1,24 +1,19 @@
--- Create raw table for csv data
--- This table stores data exactly as it comes from csv
--- Structure based on analysis of frota_detran_por_uf_2025.csv (updated: removed unused columns)
---
--- STATUS: READY - This table is ready for use
+-- Create partitioned raw table for csv data (by report_period YYYYMM)
+-- Partitions are created on demand in Python (e.g. detran_vehicle_raw_202501)
 -- Pipeline stage: Extract + Load Raw (Phase 1)
 
 CREATE TABLE IF NOT EXISTS staging.detran_vehicle_raw (
-    id_raw SERIAL PRIMARY KEY,
+    report_period INTEGER NOT NULL,
+    id_raw SERIAL,
     -- Original columns from detran csv (normalized names, Portuguese)
-    uf VARCHAR(100),  -- Original: UF
-    marca_modelo VARCHAR(100),  -- Original: Marca Modelo
-    ano_fabricacao_veiculo_crv VARCHAR(100),  -- Original: Ano Fabricação Veículo CRV
-    qtd_veiculos VARCHAR(100),  -- Original: Qtd. Veículos
-    -- Metadata columns (English)
+    uf VARCHAR(100),
+    marca_modelo VARCHAR(100),
+    ano_fabricacao_veiculo_crv VARCHAR(100),
+    qtd_veiculos VARCHAR(100),
     load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     source_file VARCHAR(500),
-    csv_row INTEGER
-);
+    csv_row INTEGER,
+    PRIMARY KEY (report_period, id_raw)
+) PARTITION BY LIST (report_period);
 
-COMMENT ON TABLE staging.detran_vehicle_raw IS 'Raw data from detran csv files, stored exactly as received (Total rows analyzed: 1,278,816)';
-
--- Indexes for faster lookups
-CREATE INDEX IF NOT EXISTS idx_raw_load_timestamp ON staging.detran_vehicle_raw(load_timestamp);
+COMMENT ON TABLE staging.detran_vehicle_raw IS 'Raw data from detran csv files, partitioned by report period (YYYYMM). Partitions created on demand.'

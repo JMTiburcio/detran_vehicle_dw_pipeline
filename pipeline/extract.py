@@ -2,11 +2,13 @@
 Extract module - Extract data from CSV files (DETRAN vehicle fleet).
 
 This module handles reading CSV files from DETRAN and preparing
-the data for loading into staging.
+the data for loading into staging. Report period is determined only by
+directory name under input (YYYYMM), not by CSV filename.
 """
 
+import re
 import pandas as pd
-from typing import List
+from typing import List, Optional, Tuple
 from pathlib import Path
 
 
@@ -102,3 +104,72 @@ def list_csv_files(directory: str) -> List[str]:
 
     csv_files = list(dir_path.glob("*.csv"))
     return [str(f.absolute()) for f in csv_files]
+
+
+def list_period_dirs(input_base: str) -> List[int]:
+    """
+    List period directories under input_base. A valid period dir has
+    a name that is exactly 6 digits (YYYYMM).
+
+    Args:
+        input_base: Base directory (e.g. data/input)
+
+    Returns:
+        Sorted list of period integers (e.g. [202501, 202506])
+    """
+    base = Path(input_base)
+    if not base.exists() or not base.is_dir():
+        return []
+    periods = []
+    for p in base.iterdir():
+        if p.is_dir() and re.match(r"^\d{6}$", p.name):
+            try:
+                periods.append(int(p.name))
+            except ValueError:
+                continue
+    return sorted(periods)
+
+
+def resolve_period_and_input_dir(
+    input_base: str,
+    period_arg: Optional[int],
+) -> Tuple[int, Path]:
+    """
+    Resolve report period and input directory for the pipeline.
+
+    If period_arg is set, use it and validate that the directory exists.
+    Otherwise, use the most recent period directory (max YYYYMM). If no
+    period directory exists, raise ValueError.
+
+    Args:
+        input_base: Base directory (e.g. data/input)
+        period_arg: Optional period from CLI (e.g. 202501), or None
+
+    Returns:
+        (report_period: int, input_dir: Path)
+
+    Raises:
+        ValueError: If no period dirs exist or specified period dir does not exist
+    """
+    base = Path(input_base)
+    if not base.exists():
+        raise ValueError(f"Diretório base não existe: {base}")
+
+    if period_arg is not None:
+        period_dir = base / str(period_arg)
+        if not period_dir.is_dir():
+            raise ValueError(
+                f"Diretório do período não encontrado: {period_dir}. "
+                "Crie o diretório YYYYMM em data/input (ex.: 202501)."
+            )
+        return period_arg, period_dir
+
+    periods = list_period_dirs(input_base)
+    if not periods:
+        raise ValueError(
+            "Nenhum diretório de período encontrado em data/input. "
+            "Crie um diretório com nome YYYYMM (ex.: 202501) e coloque o CSV dentro."
+        )
+    report_period = max(periods)
+    input_dir = base / str(report_period)
+    return report_period, input_dir

@@ -281,6 +281,8 @@ def generate_hash_veiculo_detran(
 
 DIM_VEICULO_COLUMNS = ["hash_veiculo", "marca", "modelo", "ano_fabricacao", "descricao_detran"]
 FATO_FROTA_COLUMNS = ["id_veiculo", "uf", "frota", "id_raw"]
+# For partitioned fato: report_period is prepended on insert
+FATO_FROTA_INSERT_COLUMNS = ["report_period", "id_veiculo", "uf", "frota", "id_raw"]
 
 
 def prepare_dim_veiculo_from_norm(df_norm: pd.DataFrame) -> pd.DataFrame:
@@ -310,9 +312,18 @@ def prepare_dim_veiculo_from_norm(df_norm: pd.DataFrame) -> pd.DataFrame:
     return df_dim
 
 
-def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connection] = None) -> Tuple[bool, bool]:
+def _fato_partition_name(report_period: int) -> str:
+    """Return partition table name for fato_frota_uf (e.g. fato_frota_uf_202501)."""
+    return f"fato_frota_uf_{report_period}"
+
+
+def ensure_core_detran_tables_exist(
+    report_period: int,
+    conn: Optional[psycopg2.extensions.connection] = None,
+) -> Tuple[bool, bool]:
     """
-    Ensure core schema and DETRAN tables (dim_veiculo_detran, fato_frota_uf).
+    Ensure core schema and DETRAN tables (dim_veiculo_detran, fato_frota_uf
+    partitioned) and the fato partition for report_period.
 
     Returns:
         (schema_created: bool, tables_created: bool)
@@ -330,13 +341,11 @@ def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connectio
     try:
         cursor = conn.cursor()
 
-        # 01 - Schema
         cursor.execute("SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'core'")
         if cursor.fetchone() is None:
             execute_sql_file(str(base / "01_create_schema.sql"), conn)
             schema_created = True
 
-        # 02 - dim_veiculo_detran
         cursor.execute("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = 'core' AND table_name = 'dim_veiculo_detran'
@@ -345,7 +354,6 @@ def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connectio
             execute_sql_file(str(base / "02_create_dim_veiculo_detran.sql"), conn)
             tables_created = True
 
-        # 03 - fato_frota_uf
         cursor.execute("""
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = 'core' AND table_name = 'fato_frota_uf'
@@ -354,6 +362,18 @@ def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connectio
             execute_sql_file(str(base / "03_create_fato_frota_uf.sql"), conn)
             tables_created = True
 
+        part_name = _fato_partition_name(report_period)
+        cursor.execute("""
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'core' AND tablename = %s
+        """, (part_name,))
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS core." + part_name + " PARTITION OF core.fato_frota_uf FOR VALUES IN (%s)",
+                (report_period,),
+            )
+            conn.commit()
+
         cursor.close()
         return schema_created, tables_created
     finally:
@@ -361,14 +381,16 @@ def ensure_core_detran_tables_exist(conn: Optional[psycopg2.extensions.connectio
             conn.close()
 
 
-def truncate_core_tables(conn: Optional[psycopg2.extensions.connection] = None) -> None:
+def truncate_core_tables(
+    report_period: int,
+    conn: Optional[psycopg2.extensions.connection] = None,
+) -> None:
     """
-    Truncate core tables (for full reprocessing).
-
-    Truncates fato_frota_uf first (FK to dim), then dim_veiculo_detran.
-    Uses RESTART IDENTITY to reset sequences (id_veiculo, id_fato).
+    Truncate only the fato_frota_uf partition for the given report_period.
+    dim_veiculo_detran is not truncated (shared across periods, upsert only).
 
     Args:
+        report_period: Report period YYYYMM (e.g. 202501)
         conn: Database connection (if None, creates new)
     """
     if conn is None:
@@ -379,13 +401,12 @@ def truncate_core_tables(conn: Optional[psycopg2.extensions.connection] = None) 
     try:
         cursor = conn.cursor()
         try:
-            cursor.execute(
-                "TRUNCATE TABLE core.fato_frota_uf, core.dim_veiculo_detran RESTART IDENTITY CASCADE;"
-            )
+            part_name = _fato_partition_name(report_period)
+            cursor.execute(f"TRUNCATE TABLE core.{part_name};")
             conn.commit()
         except Exception as e:
             conn.rollback()
-            raise Exception(f"Error truncating core tables: {str(e)}") from e
+            raise Exception(f"Error truncating core fato partition: {str(e)}") from e
         finally:
             cursor.close()
     finally:
@@ -483,22 +504,24 @@ def get_id_veiculo_from_hashes(
             conn.close()
 
 
-def _row_to_fato_frota_values(row: pd.Series) -> tuple:
-    """Build tuple for fato_frota_uf."""
-    return tuple(row.get(col) if not pd.isna(row.get(col)) else None for col in FATO_FROTA_COLUMNS)
+def _row_to_fato_frota_values(row: pd.Series, report_period: int) -> tuple:
+    """Build tuple for fato_frota_uf (partitioned: report_period first)."""
+    return (report_period,) + tuple(row.get(col) if not pd.isna(row.get(col)) else None for col in FATO_FROTA_COLUMNS)
 
 
 def upsert_fato_frota_uf(
     df_fato: pd.DataFrame,
+    report_period: int,
     table_name: str = "core.fato_frota_uf",
     conn: Optional[psycopg2.extensions.connection] = None,
 ) -> int:
     """
-    Upsert fato_frota_uf.
+    Upsert fato_frota_uf (into partition for report_period).
 
     Args:
         df_fato: DataFrame with columns: id_veiculo, uf, frota, id_raw
-        table_name: Target table
+        report_period: Report period YYYYMM (e.g. 202501)
+        table_name: Target table (parent partitioned table)
         conn: Database connection
 
     Returns:
@@ -516,17 +539,16 @@ def upsert_fato_frota_uf(
         if len(df_fato) == 0:
             return 0
 
-        columns_str = ", ".join(FATO_FROTA_COLUMNS)
-        # ON CONFLICT on UNIQUE(id_veiculo, uf) -> UPDATE frota and id_raw
+        columns_str = ", ".join(FATO_FROTA_INSERT_COLUMNS)
         update_set = "frota = EXCLUDED.frota, id_raw = EXCLUDED.id_raw"
 
         sql = f"""
             INSERT INTO {table_name} ({columns_str})
             VALUES %s
-            ON CONFLICT (id_veiculo, uf) DO UPDATE SET {update_set}
+            ON CONFLICT (report_period, id_veiculo, uf) DO UPDATE SET {update_set}
         """
 
-        values = [_row_to_fato_frota_values(row) for _, row in df_fato.iterrows()]
+        values = [_row_to_fato_frota_values(row, report_period) for _, row in df_fato.iterrows()]
 
         cursor = conn.cursor()
         try:

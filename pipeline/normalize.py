@@ -10,7 +10,7 @@ Normalize module - Normalize DETRAN vehicle raw data.
 import re
 import numpy as np
 import pandas as pd
-from typing import Optional
+from typing import Optional, Tuple
 from pipeline.utils import get_db_connection_from_env, execute_sql_file
 from pathlib import Path
 from psycopg2.extras import execute_values
@@ -189,11 +189,21 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df_final
 
 
-def ensure_norm_table_exists(conn=None):
+def _norm_partition_name(report_period: int) -> str:
+    """Return partition table name for norm (e.g. detran_vehicle_norm_202501)."""
+    return f"detran_vehicle_norm_{report_period}"
+
+
+def ensure_norm_table_exists(
+    report_period: int,
+    conn=None,
+) -> Tuple[bool, bool]:
     """
-    Ensure staging schema and detran_vehicle_norm table exist.
+    Ensure staging schema, detran_vehicle_norm partitioned table, and the
+    partition for report_period exist.
 
     Args:
+        report_period: Report period YYYYMM (e.g. 202501)
         conn: Database connection (if None, creates new)
 
     Returns:
@@ -215,9 +225,7 @@ def ensure_norm_table_exists(conn=None):
             FROM information_schema.schemata
             WHERE schema_name = 'staging'
         """)
-        schema_exists = cursor.fetchone() is not None
-
-        if not schema_exists:
+        if cursor.fetchone() is None:
             cursor.execute("CREATE SCHEMA IF NOT EXISTS staging;")
             conn.commit()
             schema_created = True
@@ -228,12 +236,22 @@ def ensure_norm_table_exists(conn=None):
             WHERE table_schema = 'staging'
             AND table_name = 'detran_vehicle_norm'
         """)
-        table_exists = cursor.fetchone() is not None
-
-        if not table_exists:
+        if cursor.fetchone() is None:
             sql_file = Path(__file__).parent.parent / "sql" / "staging" / "03_create_norm_table.sql"
             execute_sql_file(str(sql_file), conn)
             table_created = True
+
+        part_name = _norm_partition_name(report_period)
+        cursor.execute("""
+            SELECT tablename FROM pg_tables
+            WHERE schemaname = 'staging' AND tablename = %s
+        """, (part_name,))
+        if cursor.fetchone() is None:
+            cursor.execute(
+                "CREATE TABLE IF NOT EXISTS staging." + part_name + " PARTITION OF staging.detran_vehicle_norm FOR VALUES IN (%s)",
+                (report_period,),
+            )
+            conn.commit()
 
         cursor.close()
         return schema_created, table_created
@@ -243,15 +261,16 @@ def ensure_norm_table_exists(conn=None):
             conn.close()
 
 
-def read_raw_data(conn=None) -> pd.DataFrame:
+def read_raw_data(conn=None, report_period: Optional[int] = None) -> pd.DataFrame:
     """
-    Read raw data from staging.detran_vehicle_raw.
+    Read raw data from staging.detran_vehicle_raw (optionally for one report_period).
 
     Args:
         conn: Database connection (if None, creates new)
+        report_period: If set, only rows for this period (YYYYMM) are returned.
 
     Returns:
-        DataFrame with raw data (columns: uf, marca_modelo, ano_fabricacao_veiculo_crv, qtd_veiculos, id_raw, ...)
+        DataFrame with raw data (columns: id_raw, uf, marca_modelo, ano_fabricacao_veiculo_crv, qtd_veiculos, ...)
     """
     if conn is None:
         conn = get_db_connection_from_env()
@@ -261,19 +280,24 @@ def read_raw_data(conn=None) -> pd.DataFrame:
 
     try:
         query = "SELECT id_raw, uf, marca_modelo, ano_fabricacao_veiculo_crv, qtd_veiculos FROM staging.detran_vehicle_raw"
-        df = pd.read_sql(query, conn)
+        if report_period is not None:
+            query += " WHERE report_period = %s"
+            df = pd.read_sql(query, conn, params=(report_period,))
+        else:
+            df = pd.read_sql(query, conn)
         return df
     finally:
         if close_conn:
             conn.close()
 
 
-def read_norm_data(conn=None) -> pd.DataFrame:
+def read_norm_data(conn=None, report_period: Optional[int] = None) -> pd.DataFrame:
     """
-    Read normalized data from staging.detran_vehicle_norm.
+    Read normalized data from staging.detran_vehicle_norm (optionally for one report_period).
 
     Args:
         conn: Database connection (if None, creates new)
+        report_period: If set, only rows for this period (YYYYMM) are returned.
 
     Returns:
         DataFrame with normalized data (columns: uf, marca, modelo, ano_fabricacao, frota, descricao_detran, id_raw, ...)
@@ -286,7 +310,11 @@ def read_norm_data(conn=None) -> pd.DataFrame:
 
     try:
         query = "SELECT * FROM staging.detran_vehicle_norm"
-        df = pd.read_sql(query, conn)
+        if report_period is not None:
+            query += " WHERE report_period = %s"
+            df = pd.read_sql(query, conn, params=(report_period,))
+        else:
+            df = pd.read_sql(query, conn)
         return df
     finally:
         if close_conn:
@@ -295,17 +323,19 @@ def read_norm_data(conn=None) -> pd.DataFrame:
 
 def load_normalized_to_staging(
     df: pd.DataFrame,
+    report_period: int,
     table_name: str = "staging.detran_vehicle_norm",
     conn: Optional = None,
 ) -> int:
     """
-    Load normalized DataFrame into staging.detran_vehicle_norm.
+    Load normalized DataFrame into staging.detran_vehicle_norm (partition for report_period).
 
-    Uses INSERT only. Caller should truncate the table before load if reprocessing.
+    Uses INSERT only. Caller should truncate the partition before load if reprocessing.
 
     Args:
-        df: DataFrame with columns uf, marca, modelo, ano_fabricacao, frota, descricao_detran, id_raw
-        table_name: Target table name
+        df: DataFrame with columns uf, marca, modelo, ano_fabricacao, frota, descricao_detran, id_raw, importado
+        report_period: Report period YYYYMM (e.g. 202501)
+        table_name: Target table name (parent partitioned table)
         conn: Database connection (if None, creates new)
 
     Returns:
@@ -321,11 +351,11 @@ def load_normalized_to_staging(
         if len(df) == 0:
             return 0
 
-        columns = ["uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "id_raw", "importado"]
+        columns = ["report_period", "uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "id_raw", "importado"]
         values = []
         for _, row in df.iterrows():
-            row_values = []
-            for col in columns:
+            row_values = [report_period]
+            for col in ["uf", "marca", "modelo", "ano_fabricacao", "frota", "descricao_detran", "id_raw", "importado"]:
                 val = row.get(col)
                 if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
                     row_values.append(None)
